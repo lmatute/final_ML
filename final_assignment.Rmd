@@ -1,0 +1,199 @@
+---
+title: "Final Assignment -  Practical Machine Learning"
+author: "Luis Matute"
+date: "August 25, 2016"
+output: html_document
+---
+
+### Objective: 
+
+The objective of this paper is to model and predict the manner in which 6 people used their wearable devices to measure how well they performed barbell lifts. 
+
+The subjects used devices to track movement on their belt, forearm, arm, and dumbell. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. The goal is to predict the manner in which they did the exercises. 
+
+Two datasets are provided. A large one by the name of training and a much smaller one by the name of testing. The latter will be used for a quiz at the end of this exercise and will not be used during model creation.
+
+### Outline to achieve stated goal:
+
+We will follow this process to get to the model and predictions:
+
+1. Load required libraries and data
+2. Explore the data and pre-process where necessary
++ subset for nonrequired information( id's etc )
++ adjust for NA's and or sparse data
++ check for skewness transform if necessary
++ Check for correlation among covariates
+3. Based on the number of predictors(p) and size of the dataset (n) make an initial decision on which method to use
+4. Split the data into training and test partitions
+5. Create a model using the training partition. 
+6. Review results and make adjustments if necessary
+7. Use the model on the test partition to get an unbiased error estimate
+8. Apply the model to the second data set to get predictions for the quiz
+
+### 1-Loading
+
+We start by loading caret and e1071 which we will used for data partitioning, model creation and prediction and stats.
+
+```{r setup, include=T,cache=T,echo=T}
+library(caret)
+library(e1071)
+```
+
+Next we  load the data:
+
+```{r load_data, include=T,cache=T,echo=T}
+
+origtraining<-read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv')
+origtesting<-read.csv('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv')
+```
+
+### 2-Data Exploration and pre-processing
+
+The loaded data has the following dimensions:
+
+```{r explore,include=T,cache=T,echo=T}
+dimensions<-c(dim(origtraining),dim(origtesting))
+names(dimensions)<-c("Training_n","Vars","Testing_n","Vars")
+dimensions
+```
+
+```{r explore2,include=T,cache=T,echo=T}
+head(names(origtraining))
+tail(names(origtraining))
+```
+
+It seems that the first few columns of the training set has a number identifiers that will not contribute to the model. So we plan to delete the first 6 of them from both datasets. Specifically these are `r names(origtraining)[1:6]`. We create the training and testing sets with these first six columns deleted. 
+
+```{r adjust,include=T,cache=T,echo=T}
+training<-origtraining[,-(1:6)]
+testing<-origtesting[,-(1:6)]
+```
+
+Next we focus on na's and sparse data.  We want to avoid columns that do not have data (only na's) or have a very low percentage of values. To explore this we create two auxiliary functions *pctna* and *pctsparse* that calculate the ratio of na's and the ratio of blanks in a column. We then apply these functions to review cases where the pct of hits is below 95 % - These columns we keep and the rest we discard for the model.
+
+```{r adjust2,include=T,cache=T,echo=T}
+# na and sparse data detector function
+pctna<-function(mylist){sum(is.na(mylist) )/length(mylist)}
+pctsparse<-function(mylist){sum(mylist=='' )/length(mylist)}
+# simplify sets by deleting na columns and sparse data
+keep<-apply(training,2,pctna)<.95
+training<-training[,keep]
+keep<-apply(testing,2,pctna)<.95
+testing<-testing[,keep]
+
+keep<-apply(training,2,pctsparse)<.95
+training<-training[,keep]
+keep<-apply(testing,2,pctsparse)<.95
+testing<-testing[,keep]
+
+```
+
+Next we explore if the data has a skewness problems. 
+
+```{r adjust3,include=T,cache=T,echo=T}
+test<-training[,2:(length(training)-1)]
+res<-apply(test,2,skewness)
+skewres<-res[(res > 2) | (res < -2)]
+skewres
+
+```
+
+We see that there are 6 covariates where we have skweness problems.  We will leave these for now, as they represent a small percentage of the available covariates. We will return to these if needed, once we know more about the resulting model.
+
+In addition,we will postpone our check on correlation for once we have a better sense of the most important predictors.  
+
+### 3-Model Selection
+
+At this point we have `r dim(training)[[2]]- 1`. We need a method to handle the relatively large number of covariates and their possibly complex intercations, possibly providing ways of reducing them based on relevance. The random forest method can easily cope with these requisites so we will select this method as a start.
+
+In an initial attempt to directly run the the random forest method on the training set, it took too much processing time. So our plan will be as follows. First we will run a limited version of random forest to explore the relative importance of covariates and with this information trim down the number of covariates we want to use to generate the final model. This will solve processing speed time and hopefully still hit acceptance benchmarks.
+
+### 4- Splitting the training data 
+
+We will split the training set into a trainactive (70%) and a testactive (30%) partition, and use the latter to test our model and obtain unbiased estimates. 
+In addition, we will carve out 10 % of trainactive (named smalltest) to create a mini set to be used to determine variable importance. Using the mini set will reduce processing time and provide guidance as to which covariates to use. This mini set will be disregarded after use (will not be used in the final model creation), by complementing trainactive and smalltest into a new training set named trainfinal.
+
+```{r datasplit,include=T,cache=T,echo=T}
+set.seed(12512)
+inTrain<-createDataPartition(y=training$classe,p=.7,list=F)
+trainactive<-training[inTrain,]
+testactive<-training[-inTrain,]
+# crate a small partition to run a faster random forest to identify key variables
+smallpartition<-createDataPartition(y=trainactive$classe,p=0.1,list=F)
+smalltest<-trainactive[smallpartition,]
+
+trainfinal<-trainactive[-smallpartition,]
+
+```
+
+### 5-Model Creation
+
+As stated above,my initial attempt to run *train(classe~.,data=trainmain,method='rf')* was taking  a long time so I decided to abort it. I did not know how long it would take ....so I decided to try another strategy.
+
+50+ covariates are too much we would like to reduce them to 10 to 15. How to select them goes back to relative variable importance. To  get to the most important variables I can either use a small subsample of the trainactive data set, or I could cut the number of trees being used in the random forest algorithm. I opted for the first path.
+
+So here we create the mini-model to determine variable importance
+
+```{r modelcreate,include=T,cache=T,echo=T}
+
+minimodel<-train(classe~.,data=smalltest,method='rf')
+importantvars<-varImp(minimodel)
+plot(importantvars,main='Most Important Variables ',top=15)
+mostimp<-rownames(importantvars[[1]])[order(importantvars[[1]],decreasing=T)[1:10]]
+
+```
+
+We now circle back to review the correlation among the  top 10 covariates shown in the graph.
+( 10 is an initial guess for the number of covariates needed)
+
+```{r coradj,include=T,cache=T,echo=T}
+correl=cor(trainfinal[,mostimp])
+diag(correl)<-0
+which(abs(correl)>0.75,arr.ind=TRUE)
+```
+
+Based on the above table we eliminate one of these highly correlated variables and end with our proposed set of predictors.
+
+```{r finalvarsm,include=T,cache=T,echo=T }
+finalvars<-mostimp[-5]
+finalvars
+```
+
+Now we create the model. Note that we will reduce the number of folds to 2 (for speed). This is a case in which n >> p ( observations to covariates) so it should not be an issue. I am running this from a 2-core Macbook processor and have turned parallel processing on. Not sure if it makes a big difference here.
+
+```{r crossval,include=T,cache=T,echo=T }
+
+fitModel<-train(classe~roll_belt+num_window+pitch_forearm+magnet_dumbbell_y+magnet_dumbbell_z+pitch_belt+roll_forearm+accel_dumbbell_y+roll_dumbbell, data=trainfinal,method='rf',trControl=trainControl(method='cv',number=2),prox=T,verbose=F,allowParallel=T)
+fitModel
+```
+
+
+### 6-Review model results
+
+This model ( so far used in the trainfinal dataset) seems highly effective with an error rate of `r (1- 0.9928000) *100` pct which is very good. Also note that only 9 predictors were used to achive this result.
+
+A final observation is that none of the predictors that exibited skewness above were selected for the model. 
+
+### 7-Model eveluation on the test data and unbiased error rate
+
+```{r ontestdata,include=T,cache=T,echo=T}
+predictions<-predict(fitModel,newdata=testactive)
+confusionMat<-confusionMatrix(predictions,testactive$classe)
+confusionMat
+```
+
+Here we also observe that the model is highly accurate with an error rate of `r (1- 0.9975)*100` pct. As we never touched the training set (testactive) during construction of the model this is an unbiased estimate of the out os sample error.
+
+### 8-Prediction of the quiz testing set
+
+Here follows the quiz predictions:
+
+```{r quiz,include=T,cache=T,echo=T}
+quizp<-predict(fitModel,newdata=testing)
+testing$classe<-quizp
+data.frame(problem=seq(1,20),prediction=quizp)
+
+```
+
+
+
